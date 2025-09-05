@@ -1,0 +1,17 @@
+{
+  "name": "topchina_bot",
+  "version": "1.0.0",
+  "main": "base.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "mysql2": "^3.14.4",
+    "telegraf": "^4.16.3",
+    "uuid": "^9.0.1"
+  }
+}
