@@ -35,18 +35,27 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// Конфигурация для freedb.tech (требует SSL)
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASS,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 3306,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  // Обязательное SSL для freedb.tech
+  ssl: { rejectUnauthorized: false },
   connectionLimit: 10,
+  charset: 'utf8mb4',
+  // Настройки таймаутов
+  connectTimeout: 60000,
   acquireTimeout: 60000,
   timeout: 60000,
-  reconnect: true,
-  charset: 'utf8mb4'
+  // Дополнительные настройки для стабильности
+  multipleStatements: false,
+  dateStrings: false,
+  // Настройки для работы с freedb.tech
+  supportBigNumbers: true,
+  bigNumberStrings: true
 });
 
 const isAdmin = (ctx, next) => {
@@ -404,13 +413,34 @@ bot.on('photo', async (ctx) => {
 
 // Test database connection with retry logic
 async function testDatabaseConnection(retries = 5, delay = 2000) {
+  console.log('🔌 Тестирование подключения к базе данных...');
+  
   for (let i = 0; i < retries; i++) {
     try {
-      await pool.query('SELECT 1');
+      console.log(`📡 Попытка подключения ${i + 1}/${retries}...`);
+      const [rows] = await pool.query('SELECT 1 as test');
       console.log('✅ Подключение к базе данных успешно');
+      console.log('📊 Тестовый запрос выполнен:', rows[0]);
       return true;
     } catch (error) {
-      console.error(`❌ Попытка ${i + 1}/${retries} подключения к базе данных неудачна:`, error.message);
+      console.error(`❌ Попытка ${i + 1}/${retries} подключения к базе данных неудачна:`);
+      console.error(`   Код ошибки: ${error.code}`);
+      console.error(`   Сообщение: ${error.message}`);
+      
+      if (error.code === 'ECONNREFUSED') {
+        console.error('   🔍 Возможные причины:');
+        console.error('   - Сервер базы данных недоступен');
+        console.error('   - Неверный хост или порт');
+        console.error('   - Фаервол блокирует соединение');
+      } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+        console.error('   🔍 Возможные причины:');
+        console.error('   - Неверные учетные данные');
+        console.error('   - Пользователь не имеет доступа к базе данных');
+      } else if (error.code === 'ENOTFOUND') {
+        console.error('   🔍 Возможные причины:');
+        console.error('   - Неверное имя хоста');
+        console.error('   - Проблемы с DNS');
+      }
       
       if (i === retries - 1) {
         console.error('❌ Не удалось подключиться к базе данных после всех попыток');
