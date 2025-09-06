@@ -609,17 +609,91 @@ bot.action('status_delivered', isAdmin, async (ctx) => {
 });
 
 // Graceful shutdown
-process.once('SIGINT', () => {
+let server = null;
+
+process.once('SIGINT', async () => {
   console.log('🛑 Получен сигнал SIGINT, завершение работы...');
-  bot.stop('SIGINT');
+  
+  if (process.env.NODE_ENV === 'production') {
+    // Удаляем webhook
+    try {
+      await bot.telegram.deleteWebhook();
+      console.log('✅ Webhook удален');
+    } catch (error) {
+      console.error('❌ Ошибка при удалении webhook:', error.message);
+    }
+    
+    // Закрываем сервер
+    if (server) {
+      server.close(() => {
+        console.log('✅ HTTP сервер закрыт');
+        process.exit(0);
+      });
+    }
+  } else {
+    bot.stop('SIGINT');
+  }
+  
   pool.end();
 });
 
-process.once('SIGTERM', () => {
+process.once('SIGTERM', async () => {
   console.log('🛑 Получен сигнал SIGTERM, завершение работы...');
-  bot.stop('SIGTERM');
+  
+  if (process.env.NODE_ENV === 'production') {
+    // Удаляем webhook
+    try {
+      await bot.telegram.deleteWebhook();
+      console.log('✅ Webhook удален');
+    } catch (error) {
+      console.error('❌ Ошибка при удалении webhook:', error.message);
+    }
+    
+    // Закрываем сервер
+    if (server) {
+      server.close(() => {
+        console.log('✅ HTTP сервер закрыт');
+        process.exit(0);
+      });
+    }
+  } else {
+    bot.stop('SIGTERM');
+  }
+  
   pool.end();
 });
 
-bot.launch();
-console.log('🤖 Бот запущен...');
+// Запуск бота в зависимости от окружения
+if (process.env.NODE_ENV === 'production') {
+  // Webhook режим для production (Render)
+  const port = process.env.PORT || 3000;
+  
+  // Устанавливаем webhook
+  bot.telegram.setWebhook(`https://${process.env.RENDER_EXTERNAL_URL || 'your-app-name.onrender.com'}/webhook`);
+  
+  // Создаем Express сервер для webhook
+  const express = require('express');
+  const app = express();
+  
+  app.use(express.json());
+  
+  // Webhook endpoint
+  app.post('/webhook', (req, res) => {
+    bot.handleUpdate(req.body);
+    res.sendStatus(200);
+  });
+  
+  // Health check endpoint
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+  
+  server = app.listen(port, () => {
+    console.log(`🤖 Бот запущен в webhook режиме на порту ${port}`);
+    console.log(`📡 Webhook URL: https://${process.env.RENDER_EXTERNAL_URL || 'your-app-name.onrender.com'}/webhook`);
+  });
+} else {
+  // Polling режим для development
+  bot.launch();
+  console.log('🤖 Бот запущен в polling режиме...');
+}
