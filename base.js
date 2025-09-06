@@ -1,5 +1,6 @@
 const { Telegraf, Markup } = require('telegraf');
 const mysql = require('mysql2/promise');
+const { Pool: PgPool } = require('pg');
 const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
@@ -13,18 +14,37 @@ if (!process.env.BOT_TOKEN) {
   process.exit(1);
 }
 
-if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASS || !process.env.DB_NAME) {
-  console.error('Ошибка: Конфигурация базы данных требуется в переменных окружения (DB_HOST, DB_USER, DB_PASS, DB_NAME)');
-  console.error('Проверьте настройки в Render Dashboard -> Environment Variables');
-  process.exit(1);
+// Определяем тип базы данных
+const DB_TYPE = process.env.DB_TYPE || 'postgresql'; // postgresql или mysql
+
+// Проверяем конфигурацию в зависимости от типа БД
+if (DB_TYPE === 'postgresql') {
+  // Для PostgreSQL (Render встроенная БД)
+  if (!process.env.DATABASE_URL) {
+    console.error('Ошибка: DATABASE_URL требуется для PostgreSQL');
+    console.error('Render автоматически предоставляет DATABASE_URL для встроенной БД');
+    process.exit(1);
+  }
+} else {
+  // Для MySQL (внешние провайдеры)
+  if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASS || !process.env.DB_NAME) {
+    console.error('Ошибка: Конфигурация MySQL требуется в переменных окружения (DB_HOST, DB_USER, DB_PASS, DB_NAME)');
+    console.error('Проверьте настройки в Render Dashboard -> Environment Variables');
+    process.exit(1);
+  }
 }
 
-// Логируем конфигурацию (без пароля)
+// Логируем конфигурацию
 console.log('🔧 Конфигурация базы данных:');
-console.log(`   Host: ${process.env.DB_HOST}`);
-console.log(`   User: ${process.env.DB_USER}`);
-console.log(`   Database: ${process.env.DB_NAME}`);
-console.log(`   Port: ${process.env.DB_PORT || 3306}`);
+console.log(`   Тип: ${DB_TYPE.toUpperCase()}`);
+if (DB_TYPE === 'postgresql') {
+  console.log(`   URL: ${process.env.DATABASE_URL ? 'установлен' : 'не установлен'}`);
+} else {
+  console.log(`   Host: ${process.env.DB_HOST}`);
+  console.log(`   User: ${process.env.DB_USER}`);
+  console.log(`   Database: ${process.env.DB_NAME}`);
+  console.log(`   Port: ${process.env.DB_PORT || 3306}`);
+}
 console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -35,28 +55,38 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Конфигурация для freedb.tech (требует SSL)
-const pool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASS,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
-  // Обязательное SSL для freedb.tech
-  ssl: { rejectUnauthorized: false },
-  connectionLimit: 10,
-  charset: 'utf8mb4',
-  // Настройки таймаутов
-  connectTimeout: 60000,
-  acquireTimeout: 60000,
-  timeout: 60000,
-  // Дополнительные настройки для стабильности
-  multipleStatements: false,
-  dateStrings: false,
-  // Настройки для работы с freedb.tech
-  supportBigNumbers: true,
-  bigNumberStrings: true
-});
+// Создаем пул соединений в зависимости от типа БД
+let pool;
+
+if (DB_TYPE === 'postgresql') {
+  // PostgreSQL для Render
+  pool = new PgPool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  });
+} else {
+  // MySQL для внешних провайдеров
+  pool = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASS,
+    database: process.env.DB_NAME,
+    port: process.env.DB_PORT || 3306,
+    ssl: { rejectUnauthorized: false },
+    connectionLimit: 10,
+    charset: 'utf8mb4',
+    connectTimeout: 60000,
+    acquireTimeout: 60000,
+    timeout: 60000,
+    multipleStatements: false,
+    dateStrings: false,
+    supportBigNumbers: true,
+    bigNumberStrings: true
+  });
+}
 
 const isAdmin = (ctx, next) => {
   if (ctx.from.id.toString() === ADMIN_ID.toString()) {
@@ -72,6 +102,16 @@ const isAdminUser = (ctx) => {
 
 const generateTrackCode = () => {
   return 'TC' + uuidv4().replace(/-/g, '').substring(0, 8).toUpperCase();
+};
+
+// Универсальная функция для выполнения SQL запросов
+const executeQuery = async (query, params = []) => {
+  if (DB_TYPE === 'postgresql') {
+    const result = await pool.query(query, params);
+    return [result.rows, result];
+  } else {
+    return await pool.query(query, params);
+  }
 };
 
 bot.start((ctx) => {
@@ -418,7 +458,16 @@ async function testDatabaseConnection(retries = 5, delay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
       console.log(`📡 Попытка подключения ${i + 1}/${retries}...`);
-      const [rows] = await pool.query('SELECT 1 as test');
+      
+      let rows;
+      if (DB_TYPE === 'postgresql') {
+        const result = await pool.query('SELECT 1 as test');
+        rows = result.rows;
+      } else {
+        const result = await pool.query('SELECT 1 as test');
+        rows = result[0];
+      }
+      
       console.log('✅ Подключение к базе данных успешно');
       console.log('📊 Тестовый запрос выполнен:', rows[0]);
       return true;
@@ -432,7 +481,8 @@ async function testDatabaseConnection(retries = 5, delay = 2000) {
         console.error('   - Сервер базы данных недоступен');
         console.error('   - Неверный хост или порт');
         console.error('   - Фаервол блокирует соединение');
-      } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+        console.error('   - Render блокирует исходящие соединения к внешним БД');
+      } else if (error.code === 'ER_ACCESS_DENIED_ERROR' || error.code === '28P01') {
         console.error('   🔍 Возможные причины:');
         console.error('   - Неверные учетные данные');
         console.error('   - Пользователь не имеет доступа к базе данных');
@@ -440,11 +490,16 @@ async function testDatabaseConnection(retries = 5, delay = 2000) {
         console.error('   🔍 Возможные причины:');
         console.error('   - Неверное имя хоста');
         console.error('   - Проблемы с DNS');
+      } else if (error.code === '3D000') {
+        console.error('   🔍 Возможные причины:');
+        console.error('   - База данных не существует');
+        console.error('   - Неверное имя базы данных');
       }
       
       if (i === retries - 1) {
         console.error('❌ Не удалось подключиться к базе данных после всех попыток');
         console.log('⚠️  Бот будет работать в ограниченном режиме');
+        console.log('💡 Рекомендация: Используйте встроенную PostgreSQL базу Render');
         return false;
       }
       
