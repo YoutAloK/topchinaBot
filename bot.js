@@ -1,65 +1,62 @@
 const { Telegraf, Markup } = require('telegraf');
-const mysql = require('mysql2/promise');
 const { Pool: PgPool } = require('pg');
+const mysql = require('mysql2/promise');
 const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 
+// Загружаем переменные окружения из .env файла
 dotenv.config();
 
+// Проверяем обязательные переменные
 if (!process.env.BOT_TOKEN) {
-  console.error('Ошибка: BOT_TOKEN требуется в файле .env');
+  console.error('❌ Ошибка: BOT_TOKEN требуется в файле .env');
+  process.exit(1);
+}
+
+if (!process.env.ADMIN_ID) {
+  console.error('❌ Ошибка: ADMIN_ID требуется в файле .env');
   process.exit(1);
 }
 
 // Определяем тип базы данных
-const DB_TYPE = process.env.DB_TYPE || 'postgresql'; // postgresql или mysql
+const DB_TYPE = process.env.DB_TYPE || 'postgresql';
 
-// Проверяем конфигурацию в зависимости от типа БД
+// Проверяем конфигурацию базы данных
 if (DB_TYPE === 'postgresql') {
-  // Для PostgreSQL (Render встроенная БД)
   if (!process.env.DATABASE_URL) {
-    console.error('Ошибка: DATABASE_URL требуется для PostgreSQL');
-    console.error('Render автоматически предоставляет DATABASE_URL для встроенной БД');
+    console.error('❌ Ошибка: DATABASE_URL требуется для PostgreSQL в файле .env');
+    process.exit(1);
+  }
+} else if (DB_TYPE === 'mysql') {
+  if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASS || !process.env.DB_NAME) {
+    console.error('❌ Ошибка: Конфигурация MySQL требуется в файле .env (DB_HOST, DB_USER, DB_PASS, DB_NAME)');
     process.exit(1);
   }
 } else {
-  // Для MySQL (внешние провайдеры)
-  if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASS || !process.env.DB_NAME) {
-    console.error('Ошибка: Конфигурация MySQL требуется в переменных окружения (DB_HOST, DB_USER, DB_PASS, DB_NAME)');
-    console.error('Проверьте настройки в Render Dashboard -> Environment Variables');
-    process.exit(1);
-  }
+  console.error('❌ Ошибка: Неверный тип базы данных. Используйте postgresql или mysql');
+  process.exit(1);
 }
 
-// Логируем конфигурацию
-console.log('🔧 Конфигурация базы данных:');
-console.log(`   Тип: ${DB_TYPE.toUpperCase()}`);
-if (DB_TYPE === 'postgresql') {
-  console.log(`   URL: ${process.env.DATABASE_URL ? 'установлен' : 'не установлен'}`);
-} else {
-  console.log(`   Host: ${process.env.DB_HOST}`);
-  console.log(`   User: ${process.env.DB_USER}`);
-  console.log(`   Database: ${process.env.DB_NAME}`);
-  console.log(`   Port: ${process.env.DB_PORT || 3306}`);
-}
-console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+console.log('🔧 Конфигурация:');
+console.log(`   База данных: ${DB_TYPE.toUpperCase()}`);
+console.log(`   Режим: ${process.env.NODE_ENV || 'development'}`);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const ADMIN_ID = process.env.ADMIN_ID || 'YOUR_ADMIN_TELEGRAM_ID';
+const ADMIN_ID = process.env.ADMIN_ID;
 
+// Создаем папку для загрузок
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Создаем пул соединений в зависимости от типа БД
+// Создаем пул соединений
 let pool;
 
 if (DB_TYPE === 'postgresql') {
-  // PostgreSQL для Render
   pool = new PgPool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
@@ -68,7 +65,6 @@ if (DB_TYPE === 'postgresql') {
     connectionTimeoutMillis: 2000,
   });
 } else {
-  // MySQL для внешних провайдеров
   pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -88,22 +84,6 @@ if (DB_TYPE === 'postgresql') {
   });
 }
 
-const isAdmin = (ctx, next) => {
-  if (ctx.from.id.toString() === ADMIN_ID.toString()) {
-    return next();
-  } else {
-    ctx.reply('У вас нет прав для выполнения этого действия.');
-  }
-};
-
-const isAdminUser = (ctx) => {
-  return ctx.from.id.toString() === ADMIN_ID.toString();
-};
-
-const generateTrackCode = () => {
-  return 'TC' + uuidv4().replace(/-/g, '').substring(0, 8).toUpperCase();
-};
-
 // Универсальная функция для выполнения SQL запросов
 const executeQuery = async (query, params = []) => {
   if (DB_TYPE === 'postgresql') {
@@ -114,6 +94,28 @@ const executeQuery = async (query, params = []) => {
   }
 };
 
+// Проверка прав администратора
+const isAdmin = (ctx, next) => {
+  if (ctx.from.id.toString() === ADMIN_ID.toString()) {
+    return next();
+  } else {
+    ctx.reply('❌ У вас нет прав для выполнения этого действия.');
+  }
+};
+
+const isAdminUser = (ctx) => {
+  return ctx.from.id.toString() === ADMIN_ID.toString();
+};
+
+// Генерация трек-кода
+const generateTrackCode = () => {
+  return 'TC' + uuidv4().replace(/-/g, '').substring(0, 8).toUpperCase();
+};
+
+// Переменная для хранения данных о последнем товаре
+let lastProductData = null;
+
+// Команда /start
 bot.start((ctx) => {
   const isAdmin = isAdminUser(ctx);
   
@@ -133,6 +135,7 @@ bot.start((ctx) => {
   }
 });
 
+// Команда /help
 bot.command('help', (ctx) => {
   const isAdmin = isAdminUser(ctx);
   
@@ -145,41 +148,35 @@ bot.command('help', (ctx) => {
     helpText += '• /createorder \\- Создать новый заказ\n';
     helpText += '• /addproduct название,описание,количество \\- Добавить товар \\(затем отправьте фото\\)\n';
     helpText += '• /listorders \\- Список всех заказов\n';
-    helpText += '• /updateorder order\\_id,статус \\- Обновить статус заказа\n';
-    helpText += '• /updatedelivery order\\_id,дата \\- Обновить дату доставки\n';
+    helpText += '• /updateorder статус \\- Обновить статус последнего заказа\n';
+    helpText += '• /updatedelivery дата \\- Обновить дату доставки последнего заказа\n';
     helpText += '• Отправьте фото после /addproduct для привязки к товару\n';
   }
   
   ctx.replyWithMarkdown(helpText);
 });
 
+// Команда создания заказа
 bot.command('createorder', isAdmin, async (ctx) => {
   const trackCode = generateTrackCode();
   const currentDate = new Date().toISOString().split('T')[0];
   
   try {
-    const [result] = await pool.query(
-      'INSERT INTO orders (track_code, status, delivery_date) VALUES (?, ?, ?)',
+    const [result] = await executeQuery(
+      'INSERT INTO orders (track_code, status, delivery_date) VALUES (?, ?, ?) RETURNING order_id',
       [trackCode, 'Pending', currentDate]
     );
-    const orderId = result.insertId;
+    
+    const orderId = DB_TYPE === 'postgresql' ? result[0].order_id : result.insertId;
+    
     ctx.reply(`✅ Заказ создан!\n\n📦 ID заказа: ${orderId}\n🔍 Трек-код: ${trackCode}\n📊 Статус: В ожидании\n📅 Дата доставки: ${currentDate}\n📅 Дата создания: ${currentDate}\n\nТеперь добавьте товары командой /addproduct`);
   } catch (error) {
     console.error('Database error in createorder:', error);
-    
-    if (error.code === 'ER_ACCESS_DENIED_ERROR') {
-      ctx.reply('❌ Ошибка авторизации в базе данных. Обратитесь к администратору.');
-    } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-      ctx.reply('❌ Не удается подключиться к базе данных. Попробуйте позже.');
-    } else {
-      ctx.reply('❌ Ошибка при создании заказа.');
-    }
+    ctx.reply('❌ Ошибка при создании заказа.');
   }
 });
 
-// Переменная для хранения данных о последнем товаре
-let lastProductData = null;
-
+// Команда добавления товара
 bot.command('addproduct', isAdmin, async (ctx) => {
   const parts = ctx.message.text.split(' ').slice(1).join(' ').split(',');
   if (parts.length < 3) {
@@ -190,7 +187,7 @@ bot.command('addproduct', isAdmin, async (ctx) => {
 
   try {
     // Получаем последний созданный заказ
-    const [lastOrder] = await pool.query(
+    const [lastOrder] = await executeQuery(
       'SELECT order_id FROM orders ORDER BY order_id DESC LIMIT 1'
     );
 
@@ -215,9 +212,10 @@ bot.command('addproduct', isAdmin, async (ctx) => {
   }
 });
 
+// Команда списка заказов
 bot.command('listorders', isAdmin, async (ctx) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM orders ORDER BY order_id DESC LIMIT 10');
+    const [rows] = await executeQuery('SELECT * FROM orders ORDER BY order_id DESC LIMIT 10');
     
     if (rows.length === 0) {
       return ctx.reply('📋 Заказов не найдено.');
@@ -238,6 +236,7 @@ bot.command('listorders', isAdmin, async (ctx) => {
   }
 });
 
+// Команда обновления статуса
 bot.command('updateorder', isAdmin, async (ctx) => {
   const parts = ctx.message.text.split(' ').slice(1);
   if (parts.length < 1) {
@@ -253,7 +252,7 @@ bot.command('updateorder', isAdmin, async (ctx) => {
 
   try {
     // Получаем последний заказ
-    const [lastOrder] = await pool.query(
+    const [lastOrder] = await executeQuery(
       'SELECT order_id FROM orders ORDER BY order_id DESC LIMIT 1'
     );
 
@@ -263,7 +262,7 @@ bot.command('updateorder', isAdmin, async (ctx) => {
 
     const orderId = lastOrder[0].order_id;
 
-    await pool.query(
+    await executeQuery(
       'UPDATE orders SET status = ? WHERE order_id = ?',
       [newStatus, orderId]
     );
@@ -281,6 +280,7 @@ bot.command('updateorder', isAdmin, async (ctx) => {
   }
 });
 
+// Команда обновления даты доставки
 bot.command('updatedelivery', isAdmin, async (ctx) => {
   const parts = ctx.message.text.split(' ').slice(1);
   if (parts.length < 1) {
@@ -291,7 +291,7 @@ bot.command('updatedelivery', isAdmin, async (ctx) => {
 
   try {
     // Получаем последний заказ
-    const [lastOrder] = await pool.query(
+    const [lastOrder] = await executeQuery(
       'SELECT order_id FROM orders ORDER BY order_id DESC LIMIT 1'
     );
 
@@ -301,7 +301,7 @@ bot.command('updatedelivery', isAdmin, async (ctx) => {
 
     const orderId = lastOrder[0].order_id;
 
-    await pool.query(
+    await executeQuery(
       'UPDATE orders SET delivery_date = ? WHERE order_id = ?',
       [newDeliveryDate, orderId]
     );
@@ -313,12 +313,13 @@ bot.command('updatedelivery', isAdmin, async (ctx) => {
   }
 });
 
+// Обработка текстовых сообщений (поиск по трек-коду)
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
   try {
-    const [rows] = await pool.query(
+    const [rows] = await executeQuery(
       'SELECT * FROM orders WHERE track_code = ?',
       [text]
     );
@@ -328,7 +329,7 @@ bot.on('text', async (ctx) => {
     }
 
     const order = rows[0];
-    const [items] = await pool.query(
+    const [items] = await executeQuery(
       'SELECT * FROM order_items oi JOIN products p ON oi.product_id = p.product_id WHERE oi.order_id = ?',
       [order.order_id]
     );
@@ -374,24 +375,11 @@ bot.on('text', async (ctx) => {
     }
   } catch (error) {
     console.error('Database error:', error);
-    
-    // Специфичные ошибки подключения к БД
-    if (error.code === 'ER_ACCESS_DENIED_ERROR') {
-      ctx.reply('❌ Ошибка авторизации в базе данных. Обратитесь к администратору.');
-    } else if (error.code === 'ECONNREFUSED') {
-      ctx.reply('❌ Не удается подключиться к серверу базы данных. Попробуйте позже.');
-    } else if (error.code === 'ETIMEDOUT') {
-      ctx.reply('❌ Время ожидания подключения к базе данных истекло. Попробуйте позже.');
-    } else if (error.code === 'ENOTFOUND') {
-      ctx.reply('❌ Сервер базы данных не найден. Обратитесь к администратору.');
-    } else if (error.code === 'PROTOCOL_CONNECTION_LOST') {
-      ctx.reply('❌ Соединение с базой данных потеряно. Попробуйте позже.');
-    } else {
-      ctx.reply('❌ Произошла ошибка при получении информации о заказе. Попробуйте позже.');
-    }
+    ctx.reply('❌ Произошла ошибка при получении информации о заказе. Попробуйте позже.');
   }
 });
 
+// Обработка фото
 bot.on('photo', async (ctx) => {
   if (ctx.from.id.toString() !== ADMIN_ID.toString()) return;
 
@@ -403,7 +391,6 @@ bot.on('photo', async (ctx) => {
     const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
     
     // Скачиваем файл
-    
     const downloadPath = path.join(__dirname, 'uploads', `${photo.file_id}.jpg`);
     const fileStream = fs.createWriteStream(downloadPath);
     
@@ -423,16 +410,17 @@ bot.on('photo', async (ctx) => {
         const { orderId, name, description, quantity } = lastProductData;
         const imageUrl = `${photo.file_id}.jpg`;
 
-    const [prodResult] = await pool.query(
-      'INSERT INTO products (name, description, image_url) VALUES (?, ?, ?)',
-      [name, description, imageUrl]
-    );
-    const productId = prodResult.insertId;
+        const [prodResult] = await executeQuery(
+          'INSERT INTO products (name, description, image_url) VALUES (?, ?, ?) RETURNING product_id',
+          [name, description, imageUrl]
+        );
+        
+        const productId = DB_TYPE === 'postgresql' ? prodResult[0].product_id : prodResult.insertId;
 
-    await pool.query(
-      'INSERT INTO order_items (order_id, product_id, quantity) VALUES (?, ?, ?)',
-      [orderId, productId, quantity]
-    );
+        await executeQuery(
+          'INSERT INTO order_items (order_id, product_id, quantity) VALUES (?, ?, ?)',
+          [orderId, productId, quantity]
+        );
 
         ctx.reply(`✅ Товар с фото добавлен к заказу!\n\n📦 ID заказа: ${orderId}\n🛍️ Товар: ${name}\n📊 Количество: ${quantity}\n📸 Фото: ${imageUrl}`);
         
@@ -451,79 +439,19 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// Test database connection with retry logic
-async function testDatabaseConnection(retries = 5, delay = 2000) {
-  console.log('🔌 Тестирование подключения к базе данных...');
-  
-  for (let i = 0; i < retries; i++) {
-    try {
-      console.log(`📡 Попытка подключения ${i + 1}/${retries}...`);
-      
-      let rows;
-      if (DB_TYPE === 'postgresql') {
-        const result = await pool.query('SELECT 1 as test');
-        rows = result.rows;
-      } else {
-        const result = await pool.query('SELECT 1 as test');
-        rows = result[0];
-      }
-      
-      console.log('✅ Подключение к базе данных успешно');
-      console.log('📊 Тестовый запрос выполнен:', rows[0]);
-      return true;
-    } catch (error) {
-      console.error(`❌ Попытка ${i + 1}/${retries} подключения к базе данных неудачна:`);
-      console.error(`   Код ошибки: ${error.code}`);
-      console.error(`   Сообщение: ${error.message}`);
-      
-      if (error.code === 'ECONNREFUSED') {
-        console.error('   🔍 Возможные причины:');
-        console.error('   - Сервер базы данных недоступен');
-        console.error('   - Неверный хост или порт');
-        console.error('   - Фаервол блокирует соединение');
-        console.error('   - Render блокирует исходящие соединения к внешним БД');
-      } else if (error.code === 'ER_ACCESS_DENIED_ERROR' || error.code === '28P01') {
-        console.error('   🔍 Возможные причины:');
-        console.error('   - Неверные учетные данные');
-        console.error('   - Пользователь не имеет доступа к базе данных');
-      } else if (error.code === 'ENOTFOUND') {
-        console.error('   🔍 Возможные причины:');
-        console.error('   - Неверное имя хоста');
-        console.error('   - Проблемы с DNS');
-      } else if (error.code === '3D000') {
-        console.error('   🔍 Возможные причины:');
-        console.error('   - База данных не существует');
-        console.error('   - Неверное имя базы данных');
-      }
-      
-      if (i === retries - 1) {
-        console.error('❌ Не удалось подключиться к базе данных после всех попыток');
-        console.log('⚠️  Бот будет работать в ограниченном режиме');
-        console.log('💡 Рекомендация: Используйте встроенную PostgreSQL базу Render');
-        return false;
-      }
-      
-      console.log(`⏳ Повторная попытка через ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-      delay *= 1.5; // Увеличиваем задержку с каждой попыткой
-    }
-  }
-}
-
-// Запускаем тест подключения
-testDatabaseConnection();
-
 // Обработчики кнопок меню
 bot.action('create_order', isAdmin, async (ctx) => {
   const trackCode = generateTrackCode();
   const currentDate = new Date().toISOString().split('T')[0];
   
   try {
-    const [result] = await pool.query(
-      'INSERT INTO orders (track_code, status, delivery_date) VALUES (?, ?, ?)',
+    const [result] = await executeQuery(
+      'INSERT INTO orders (track_code, status, delivery_date) VALUES (?, ?, ?) RETURNING order_id',
       [trackCode, 'Pending', currentDate]
     );
-    const orderId = result.insertId;
+    
+    const orderId = DB_TYPE === 'postgresql' ? result[0].order_id : result.insertId;
+    
     ctx.reply(`✅ Заказ создан!\n\n📦 ID заказа: ${orderId}\n🔍 Трек-код: ${trackCode}\n📊 Статус: В ожидании\n📅 Дата доставки: ${currentDate}\n📅 Дата создания: ${currentDate}\n\nТеперь добавьте товары командой /addproduct`);
   } catch (error) {
     console.error(error);
@@ -537,7 +465,7 @@ bot.action('add_product', isAdmin, (ctx) => {
 
 bot.action('list_orders', isAdmin, async (ctx) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM orders ORDER BY order_id DESC LIMIT 10');
+    const [rows] = await executeQuery('SELECT * FROM orders ORDER BY order_id DESC LIMIT 10');
     
     if (rows.length === 0) {
       return ctx.reply('📋 Заказов не найдено.');
@@ -593,7 +521,7 @@ bot.action('help', (ctx) => {
 // Обработчики статусов
 bot.action('status_pending', isAdmin, async (ctx) => {
   try {
-    const [lastOrder] = await pool.query(
+    const [lastOrder] = await executeQuery(
       'SELECT order_id FROM orders ORDER BY order_id DESC LIMIT 1'
     );
 
@@ -603,7 +531,7 @@ bot.action('status_pending', isAdmin, async (ctx) => {
 
     const orderId = lastOrder[0].order_id;
 
-    await pool.query(
+    await executeQuery(
       'UPDATE orders SET status = ? WHERE order_id = ?',
       ['Pending', orderId]
     );
@@ -617,7 +545,7 @@ bot.action('status_pending', isAdmin, async (ctx) => {
 
 bot.action('status_shipped', isAdmin, async (ctx) => {
   try {
-    const [lastOrder] = await pool.query(
+    const [lastOrder] = await executeQuery(
       'SELECT order_id FROM orders ORDER BY order_id DESC LIMIT 1'
     );
 
@@ -627,7 +555,7 @@ bot.action('status_shipped', isAdmin, async (ctx) => {
 
     const orderId = lastOrder[0].order_id;
 
-    await pool.query(
+    await executeQuery(
       'UPDATE orders SET status = ? WHERE order_id = ?',
       ['Shipped', orderId]
     );
@@ -641,7 +569,7 @@ bot.action('status_shipped', isAdmin, async (ctx) => {
 
 bot.action('status_delivered', isAdmin, async (ctx) => {
   try {
-    const [lastOrder] = await pool.query(
+    const [lastOrder] = await executeQuery(
       'SELECT order_id FROM orders ORDER BY order_id DESC LIMIT 1'
     );
 
@@ -651,7 +579,7 @@ bot.action('status_delivered', isAdmin, async (ctx) => {
 
     const orderId = lastOrder[0].order_id;
 
-    await pool.query(
+    await executeQuery(
       'UPDATE orders SET status = ? WHERE order_id = ?',
       ['Delivered', orderId]
     );
@@ -663,92 +591,51 @@ bot.action('status_delivered', isAdmin, async (ctx) => {
   }
 });
 
-// Graceful shutdown
-let server = null;
-
-process.once('SIGINT', async () => {
-  console.log('🛑 Получен сигнал SIGINT, завершение работы...');
+// Тест подключения к базе данных
+async function testDatabaseConnection() {
+  console.log('🔌 Тестирование подключения к базе данных...');
   
-  if (process.env.NODE_ENV === 'production') {
-    // Удаляем webhook
-    try {
-      await bot.telegram.deleteWebhook();
-      console.log('✅ Webhook удален');
-    } catch (error) {
-      console.error('❌ Ошибка при удалении webhook:', error.message);
+  try {
+    let rows;
+    if (DB_TYPE === 'postgresql') {
+      const result = await pool.query('SELECT 1 as test');
+      rows = result.rows;
+    } else {
+      const result = await pool.query('SELECT 1 as test');
+      rows = result[0];
     }
     
-    // Закрываем сервер
-    if (server) {
-      server.close(() => {
-        console.log('✅ HTTP сервер закрыт');
-        process.exit(0);
-      });
-    }
-  } else {
-    bot.stop('SIGINT');
+    console.log('✅ Подключение к базе данных успешно');
+    console.log('📊 Тестовый запрос выполнен:', rows[0]);
+    return true;
+  } catch (error) {
+    console.error('❌ Ошибка подключения к базе данных:', error.message);
+    console.log('⚠️  Бот будет работать в ограниченном режиме');
+    return false;
   }
-  
-  pool.end();
+}
+
+// Graceful shutdown
+process.once('SIGINT', async () => {
+  console.log('🛑 Получен сигнал SIGINT, завершение работы...');
+  bot.stop('SIGINT');
+  await pool.end();
 });
 
 process.once('SIGTERM', async () => {
   console.log('🛑 Получен сигнал SIGTERM, завершение работы...');
-  
-  if (process.env.NODE_ENV === 'production') {
-    // Удаляем webhook
-    try {
-      await bot.telegram.deleteWebhook();
-      console.log('✅ Webhook удален');
-    } catch (error) {
-      console.error('❌ Ошибка при удалении webhook:', error.message);
-    }
-    
-    // Закрываем сервер
-    if (server) {
-      server.close(() => {
-        console.log('✅ HTTP сервер закрыт');
-        process.exit(0);
-      });
-    }
-  } else {
-    bot.stop('SIGTERM');
-  }
-  
-  pool.end();
+  bot.stop('SIGTERM');
+  await pool.end();
 });
 
-// Запуск бота в зависимости от окружения
-if (process.env.NODE_ENV === 'production') {
-  // Webhook режим для production (Render)
-  const port = process.env.PORT || 3000;
+// Запуск бота
+async function startBot() {
+  // Тестируем подключение к базе данных
+  await testDatabaseConnection();
   
-  // Устанавливаем webhook
-  bot.telegram.setWebhook(`https://${process.env.RENDER_EXTERNAL_URL || 'your-app-name.onrender.com'}/webhook`);
-  
-  // Создаем Express сервер для webhook
-  const express = require('express');
-  const app = express();
-  
-  app.use(express.json());
-  
-  // Webhook endpoint
-  app.post('/webhook', (req, res) => {
-    bot.handleUpdate(req.body);
-    res.sendStatus(200);
-  });
-  
-  // Health check endpoint
-  app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
-  
-  server = app.listen(port, () => {
-    console.log(`🤖 Бот запущен в webhook режиме на порту ${port}`);
-    console.log(`📡 Webhook URL: https://${process.env.RENDER_EXTERNAL_URL || 'your-app-name.onrender.com'}/webhook`);
-  });
-} else {
-  // Polling режим для development
+  // Запускаем бота
   bot.launch();
   console.log('🤖 Бот запущен в polling режиме...');
 }
+
+startBot().catch(console.error);

@@ -1,11 +1,10 @@
 {
   "name": "topchina_bot",
   "version": "1.0.0",
-  "main": "base.js",
+  "main": "bot.js",
   "scripts": {
-    "start": "node base.js",
-    "setup-db": "node setup_postgresql.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.js",
+    "setup-db": "node setup_db.js"
   },
   "author": "",
   "license": "ISC",
