@@ -14,9 +14,18 @@ if (!process.env.BOT_TOKEN) {
 }
 
 if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASS || !process.env.DB_NAME) {
-  console.error('Ошибка: Конфигурация базы данных требуется в файле .env (DB_HOST, DB_USER, DB_PASS, DB_NAME)');
+  console.error('Ошибка: Конфигурация базы данных требуется в переменных окружения (DB_HOST, DB_USER, DB_PASS, DB_NAME)');
+  console.error('Проверьте настройки в Render Dashboard -> Environment Variables');
   process.exit(1);
 }
+
+// Логируем конфигурацию (без пароля)
+console.log('🔧 Конфигурация базы данных:');
+console.log(`   Host: ${process.env.DB_HOST}`);
+console.log(`   User: ${process.env.DB_USER}`);
+console.log(`   Database: ${process.env.DB_NAME}`);
+console.log(`   Port: ${process.env.DB_PORT || 3306}`);
+console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID || 'YOUR_ADMIN_TELEGRAM_ID';
@@ -31,6 +40,13 @@ const pool = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASS,
   database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  connectionLimit: 10,
+  acquireTimeout: 60000,
+  timeout: 60000,
+  reconnect: true,
+  charset: 'utf8mb4'
 });
 
 const isAdmin = (ctx, next) => {
@@ -100,8 +116,15 @@ bot.command('createorder', isAdmin, async (ctx) => {
     const orderId = result.insertId;
     ctx.reply(`✅ Заказ создан!\n\n📦 ID заказа: ${orderId}\n🔍 Трек-код: ${trackCode}\n📊 Статус: В ожидании\n📅 Дата доставки: ${currentDate}\n📅 Дата создания: ${currentDate}\n\nТеперь добавьте товары командой /addproduct`);
   } catch (error) {
-    console.error(error);
-    ctx.reply('❌ Ошибка при создании заказа.');
+    console.error('Database error in createorder:', error);
+    
+    if (error.code === 'ER_ACCESS_DENIED_ERROR') {
+      ctx.reply('❌ Ошибка авторизации в базе данных. Обратитесь к администратору.');
+    } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+      ctx.reply('❌ Не удается подключиться к базе данных. Попробуйте позже.');
+    } else {
+      ctx.reply('❌ Ошибка при создании заказа.');
+    }
   }
 });
 
@@ -302,10 +325,20 @@ bot.on('text', async (ctx) => {
     }
   } catch (error) {
     console.error('Database error:', error);
+    
+    // Специфичные ошибки подключения к БД
     if (error.code === 'ER_ACCESS_DENIED_ERROR') {
-      ctx.reply('❌ Ошибка подключения к базе данных. Обратитесь к администратору.');
+      ctx.reply('❌ Ошибка авторизации в базе данных. Обратитесь к администратору.');
+    } else if (error.code === 'ECONNREFUSED') {
+      ctx.reply('❌ Не удается подключиться к серверу базы данных. Попробуйте позже.');
+    } else if (error.code === 'ETIMEDOUT') {
+      ctx.reply('❌ Время ожидания подключения к базе данных истекло. Попробуйте позже.');
+    } else if (error.code === 'ENOTFOUND') {
+      ctx.reply('❌ Сервер базы данных не найден. Обратитесь к администратору.');
+    } else if (error.code === 'PROTOCOL_CONNECTION_LOST') {
+      ctx.reply('❌ Соединение с базой данных потеряно. Попробуйте позже.');
     } else {
-      ctx.reply('❌ Произошла ошибка при получении информации о заказе.');
+      ctx.reply('❌ Произошла ошибка при получении информации о заказе. Попробуйте позже.');
     }
   }
 });
@@ -369,17 +402,30 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// Test database connection
-async function testDatabaseConnection() {
-  try {
-    await pool.query('SELECT 1');
-    console.log('✅ Подключение к базе данных успешно');
-  } catch (error) {
-    console.error('❌ Ошибка подключения к базе данных:', error.message);
-    console.log('⚠️  Бот будет работать в ограниченном режиме');
+// Test database connection with retry logic
+async function testDatabaseConnection(retries = 5, delay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await pool.query('SELECT 1');
+      console.log('✅ Подключение к базе данных успешно');
+      return true;
+    } catch (error) {
+      console.error(`❌ Попытка ${i + 1}/${retries} подключения к базе данных неудачна:`, error.message);
+      
+      if (i === retries - 1) {
+        console.error('❌ Не удалось подключиться к базе данных после всех попыток');
+        console.log('⚠️  Бот будет работать в ограниченном режиме');
+        return false;
+      }
+      
+      console.log(`⏳ Повторная попытка через ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 1.5; // Увеличиваем задержку с каждой попыткой
+    }
   }
 }
 
+// Запускаем тест подключения
 testDatabaseConnection();
 
 // Обработчики кнопок меню
@@ -530,6 +576,19 @@ bot.action('status_delivered', isAdmin, async (ctx) => {
     console.error(error);
     ctx.reply('❌ Ошибка при обновлении статуса.');
   }
+});
+
+// Graceful shutdown
+process.once('SIGINT', () => {
+  console.log('🛑 Получен сигнал SIGINT, завершение работы...');
+  bot.stop('SIGINT');
+  pool.end();
+});
+
+process.once('SIGTERM', () => {
+  console.log('🛑 Получен сигнал SIGTERM, завершение работы...');
+  bot.stop('SIGTERM');
+  pool.end();
 });
 
 bot.launch();
